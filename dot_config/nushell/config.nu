@@ -17,6 +17,4 @@
 # options using:
 #     config nu --doc | nu-highlight | less -R
 $env.EDITOR = 'nvim'
-zoxide init nushell | save -f ~/.zoxide.nu
 $env.config.shell_integration.osc133 = false
-source $"($nu.home-path)/.cargo/env.nu"
