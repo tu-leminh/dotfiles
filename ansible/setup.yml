@@ -1,0 +1,61 @@
+---
+- name: Bootstrap Environment Tools
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  tasks:
+    - name: Install essential tools via Homebrew
+      community.general.homebrew:
+        name:
+          - neovim
+          - k9s
+          - nushell
+          - starship
+          - fluxcd/tap/flux
+          - wezterm
+          - lazygit
+          - tree-sitter
+          - gcc
+          - curl
+          - fzf
+          - ripgrep
+          - fd
+          - gemini-cli
+          - codex
+          - anomalyco/tap/opencode
+        state: present
+        update_homebrew: true
+
+    - name: Bootstrap k3s cluster on 'dell'
+      when: ansible_hostname == 'dell'
+      block:
+        - name: Check if k3s is already installed
+          ansible.builtin.command: which k3s
+          register: k3s_check
+          failed_when: false
+          changed_when: false
+
+        - name: Install k3s
+          ansible.builtin.shell: curl -sfL https://get.k3s.io | sh -
+          when: k3s_check.rc != 0
+          become: true
+
+        - name: Ensure k3s kubeconfig is readable
+          ansible.builtin.file:
+            path: /etc/rancher/k3s/k3s.yaml
+            mode: '0644'
+          become: true
+
+        - name: Wait for Kubernetes API to be ready
+          ansible.builtin.command: k3s kubectl get nodes
+          register: k3s_ready
+          until: k3s_ready.rc == 0
+          retries: 6
+          delay: 10
+          become: true
+          changed_when: false
+
+        - name: Note on GitOps Bootstrap
+          ansible.builtin.debug:
+            msg: "k3s and Flux are installed. Next, run: flux bootstrap github --owner=<user> --repository=<repo> --path=clusters/my-cluster --personal"
