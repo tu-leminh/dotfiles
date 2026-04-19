@@ -5,6 +5,14 @@
   gather_facts: true
 
   tasks:
+    - name: Ensure Homebrew taps are added
+      community.general.homebrew_tap:
+        name:
+          - fluxcd/tap
+          - anomalyco/tap
+          - wezterm/wezterm-linuxbrew
+        state: present
+
     - name: Install essential tools via Homebrew
       community.general.homebrew:
         name:
@@ -13,7 +21,6 @@
           - nushell
           - starship
           - fluxcd/tap/flux
-          - wezterm
           - lazygit
           - tree-sitter
           - gcc
@@ -22,13 +29,18 @@
           - ripgrep
           - fd
           - gemini-cli
-          - codex
           - anomalyco/tap/opencode
+          - kubectl
+          - helm
+          - btop
+          - superfile
+          - "{{ 'wezterm' if ansible_facts['os_family'] == 'Darwin' else 'wezterm/wezterm-linuxbrew/wezterm' }}"
+          - codex
         state: present
         update_homebrew: true
 
     - name: Bootstrap k3s cluster on 'dell'
-      when: ansible_hostname == 'dell'
+      when: ansible_facts['hostname'] == 'dell'
       block:
         - name: Check if k3s is already installed
           ansible.builtin.command: which k3s
