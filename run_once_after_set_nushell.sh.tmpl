@@ -1,0 +1,4 @@
+#!/bin/bash
+NU="/home/linuxbrew/.linuxbrew/bin/nu"
+grep -q "$NU" /etc/shells || echo "$NU" | sudo tee -a /etc/shells
+sudo chsh -s "$NU" "$USER"

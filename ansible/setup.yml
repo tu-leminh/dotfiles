@@ -3,71 +3,136 @@
   hosts: localhost
   connection: local
   gather_facts: true
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
 
   tasks:
     - name: Ensure Homebrew taps are added
       community.general.homebrew_tap:
-        name:
-          - fluxcd/tap
-          - anomalyco/tap
-          - wezterm/wezterm-linuxbrew
+        name: [ fluxcd/tap, anomalyco/tap, wezterm/wezterm-linuxbrew ]
         state: present
 
     - name: Install essential tools via Homebrew
       community.general.homebrew:
-        name:
-          - neovim
-          - k9s
-          - nushell
-          - starship
-          - fluxcd/tap/flux
-          - lazygit
-          - tree-sitter
-          - gcc
-          - curl
-          - fzf
-          - ripgrep
-          - fd
-          - gemini-cli
-          - anomalyco/tap/opencode
-          - kubectl
-          - helm
-          - btop
-          - superfile
-          - "{{ 'wezterm' if ansible_facts['os_family'] == 'Darwin' else 'wezterm/wezterm-linuxbrew/wezterm' }}"
-          - codex
+        name: [ neovim, k9s, nushell, starship, fluxcd/tap/flux, lazygit, tree-sitter, gcc, curl, fzf, ripgrep, fd, gemini-cli, anomalyco/tap/opencode, kubectl, helm@3, argocd, btop, superfile, "{{ 'wezterm' if ansible_facts['os_family'] == 'Darwin' else 'wezterm/wezterm-linuxbrew/wezterm' }}", codex, tree-sitter-cli, node, git, claude-code ]
         state: present
         update_homebrew: true
 
-    - name: Bootstrap k3s cluster on 'dell'
+    - name: Bootstrap K3s & GitOps on 'dell'
       when: ansible_facts['hostname'] == 'dell'
       block:
-        - name: Check if k3s is already installed
-          ansible.builtin.command: which k3s
-          register: k3s_check
-          failed_when: false
-          changed_when: false
-
-        - name: Install k3s
-          ansible.builtin.shell: curl -sfL https://get.k3s.io | sh -
-          when: k3s_check.rc != 0
+        - name: Setup storage directory
+          ansible.builtin.file:
+            path: /data
+            state: directory
+            mode: '0777'
+            recurse: true
           become: true
 
-        - name: Ensure k3s kubeconfig is readable
+        - name: Download K3s install script
+          ansible.builtin.get_url:
+            url: https://get.k3s.io
+            dest: /tmp/k3s-install.sh
+            mode: '0755'
+
+        - name: Install k3s with native options
+          ansible.builtin.command: /tmp/k3s-install.sh server --disable traefik --disable servicelb
+          args:
+            creates: /usr/local/bin/k3s
+          become: true
+
+        - name: Ensure ~/.kube exists
           ansible.builtin.file:
-            path: /etc/rancher/k3s/k3s.yaml
-            mode: '0644'
+            path: "{{ ansible_facts['env']['HOME'] }}/.kube"
+            state: directory
+            mode: '0700'
+
+        - name: Copy kubeconfig to user home
+          ansible.builtin.copy:
+            src: /etc/rancher/k3s/k3s.yaml
+            dest: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+            remote_src: true
+            mode: '0600'
+            owner: "{{ ansible_facts['user_id'] }}"
           become: true
 
         - name: Wait for Kubernetes API to be ready
-          ansible.builtin.command: k3s kubectl get nodes
-          register: k3s_ready
-          until: k3s_ready.rc == 0
-          retries: 6
-          delay: 10
-          become: true
-          changed_when: false
+          kubernetes.core.k8s_info:
+            kind: Node
+            kubeconfig: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+          register: node_info
+          until: node_info.get('resources', []) | length > 0
+          retries: 24
+          delay: 5
+
+        - name: Add Argo CD Helm repository
+          kubernetes.core.helm_repository:
+            name: argo
+            repo_url: https://argoproj.github.io/argo-helm
+            binary_path: /home/linuxbrew/.linuxbrew/opt/helm@3/bin/helm
+
+        - name: Install helm-diff plugin
+          kubernetes.core.helm_plugin:
+            plugin_path: https://github.com/databus23/helm-diff
+            state: present
+            binary_path: /home/linuxbrew/.linuxbrew/opt/helm@3/bin/helm
+
+        - name: Install Argo CD via Helm
+          kubernetes.core.helm:
+            name: argocd
+            chart_ref: argo/argo-cd
+            release_namespace: core
+            create_namespace: true
+            binary_path: /home/linuxbrew/.linuxbrew/opt/helm@3/bin/helm
+            kubeconfig: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+            set_values:
+              - value: server.service.type=LoadBalancer
+              - value: server.insecure=true
+
+        - name: Register Private Repository Secret
+          kubernetes.core.k8s:
+            state: present
+            kubeconfig: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: repo-creds
+                namespace: core
+                labels:
+                  argocd.argoproj.io/secret-type: repository
+              stringData:
+                type: git
+                url: "https://github.com/tu-leminh/argohome"
+                username: "tu-leminh"
+                password: "{{ lookup('env', 'GITHUB_TOKEN') }}"
+
+        - name: Wait for Argo CD server to be ready
+          kubernetes.core.k8s_info:
+            kind: Deployment
+            name: argocd-server
+            namespace: core
+            kubeconfig: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+            wait: true
+            wait_timeout: 300
+            wait_condition:
+              type: Available
+              status: "True"
+
+        - name: Deploy Apps from ArgoHome (ApplicationSet)
+          kubernetes.core.k8s:
+            state: present
+            kubeconfig: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+            src: /home/mt/argohome/bootstrap/applicationset.yaml
+
+        - name: Retrieve Argo CD Admin Password
+          kubernetes.core.k8s_info:
+            kind: Secret
+            name: argocd-initial-admin-secret
+            namespace: core
+            kubeconfig: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+          register: argocd_secret
 
         - name: Note on GitOps Bootstrap
           ansible.builtin.debug:
-            msg: "k3s and Flux are installed. Next, run: flux bootstrap github --owner=<user> --repository=<repo> --path=clusters/my-cluster --personal"
+            msg: "k3s and Argo CD are installed. Argo CD Admin Password: {{ argocd_secret.resources[0].data.password | b64decode }}"
