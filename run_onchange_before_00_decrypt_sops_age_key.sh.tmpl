@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# hash: {{ include "bootstrap/sops_age_key.txt.age" | sha256sum }}
+
+set -e
+
+KEY="${HOME}/.config/sops/age/keys.txt"
+BLOB="{{ joinPath .chezmoi.sourceDir "bootstrap/sops_age_key.txt.age" }}"
+
+if [ -f "${KEY}" ]; then
+    exit 0
+fi
+
+if ! command -v age >/dev/null 2>&1; then
+    echo "Error: age not installed. Run: brew install age" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "${KEY}")"
+age -d -o "${KEY}" "${BLOB}"
+chmod 600 "${KEY}"
+echo "Provisioned SOPS age identity at ${KEY}"
